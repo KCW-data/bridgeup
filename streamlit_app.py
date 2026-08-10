@@ -6,10 +6,11 @@ import os
 import re
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlencode
 
 import streamlit as st
 
@@ -17,7 +18,7 @@ import streamlit as st
 st.set_page_config(
     page_title="AIVIO Bridge-Up",
     page_icon="A",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="collapsed",
 )
 
@@ -25,63 +26,44 @@ st.set_page_config(
 MAX_SAM_MEDIA_BYTES = 25 * 1024 * 1024
 SAM_MEDIA_EXTENSIONS = {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".mov", ".ogg", ".wav", ".webm"}
 SAM_BASE_URL = "https://sam.soonsoon.ai"
+KIPRISPLUS_BASE_URL = "http://plus.kipris.or.kr"
+KIPRISPLUS_DEFAULT_ENDPOINT = (
+    "http://plus.kipris.or.kr/kipo-api/kipi/patUtiModInfoSearchSevice/getAdvancedSearch"
+)
 
-PIPELINE_STAGES = [
-    ("collected", "자료 수집"),
-    ("ai_drafted", "AI 초안"),
-    ("junior_editing", "주니어 협업"),
-    ("senior_review", "시니어 검수"),
-    ("company_review", "기업 검수"),
-    ("approved", "최종 승인"),
+STEP_LABELS = [
+    ("capture", "1 입력"),
+    ("draft", "2 AI 정리"),
+    ("collab", "3 협업 검수"),
+    ("result", "4 결과"),
 ]
-PIPELINE_LABELS = dict(PIPELINE_STAGES)
-STATUS_OPTIONS = ["대기", "진행", "검수요청", "수정요청", "완료"]
+
+STATUS_OPTIONS = ["대기", "진행", "확인 필요", "완료"]
 
 DEFAULT_JUNIOR_TASKS = [
     {
-        "id": "transcript-cleanup",
-        "title": "STT 전사문 정리",
-        "owner": "주니어",
-        "status": "진행",
-        "progress": 30,
-        "evidence": "",
-        "question": "",
+        "id": "transcript-check",
+        "title": "전사문과 현장 용어 확인",
+        "status": "대기",
+        "memo": "",
     },
     {
-        "id": "work-uniting",
-        "title": "작업 단위 분리",
-        "owner": "주니어",
+        "id": "process-structure",
+        "title": "작업 순서와 판단 기준 정리",
         "status": "대기",
-        "progress": 10,
-        "evidence": "",
-        "question": "",
-    },
-    {
-        "id": "draft-making",
-        "title": "결과물 초안 구성",
-        "owner": "주니어",
-        "status": "대기",
-        "progress": 10,
-        "evidence": "",
-        "question": "",
+        "memo": "",
     },
     {
         "id": "review-questions",
-        "title": "시니어·기업 검수 질문 정리",
-        "owner": "주니어",
+        "title": "시니어·기업 검수 질문 표시",
         "status": "대기",
-        "progress": 0,
-        "evidence": "",
-        "question": "",
+        "memo": "",
     },
     {
-        "id": "revision",
-        "title": "검수 의견 반영",
-        "owner": "주니어",
+        "id": "final-document",
+        "title": "최종 문서 다듬기",
         "status": "대기",
-        "progress": 0,
-        "evidence": "",
-        "question": "",
+        "memo": "",
     },
 ]
 
@@ -110,117 +92,167 @@ def inject_style() -> None:
         <style>
         :root {
           --aivio-text: #111318;
-          --aivio-muted: #626b76;
-          --aivio-line: #dfe4ea;
+          --aivio-muted: #59616d;
+          --aivio-line: #dce2ea;
+          --aivio-soft: #f7f8fa;
           --aivio-blue: #155eef;
           --aivio-green: #147d64;
-          --aivio-amber: #b7791f;
+          --aivio-amber: #a15c00;
+        }
+
+        html, body, [data-testid="stAppViewContainer"] {
+          font-size: 20px;
         }
 
         .block-container {
-          padding-top: 2.2rem;
-          padding-bottom: 3rem;
+          max-width: 900px;
+          padding: 1.35rem 1rem 3rem;
+        }
+
+        [data-testid="stMarkdownContainer"] p,
+        [data-testid="stMarkdownContainer"] li {
+          color: var(--aivio-text);
+          font-size: 1.05rem;
+          line-height: 1.7;
+        }
+
+        h1, h2, h3 {
+          letter-spacing: 0;
         }
 
         .aivio-hero {
           border-bottom: 1px solid var(--aivio-line);
-          margin-bottom: 1.4rem;
-          padding-bottom: 1.2rem;
+          margin-bottom: 1.05rem;
+          padding-bottom: 1.1rem;
         }
 
         .aivio-kicker {
           color: var(--aivio-blue);
-          font-size: 0.78rem;
-          font-weight: 800;
+          font-size: 0.9rem;
+          font-weight: 850;
           letter-spacing: 0;
-          margin-bottom: 0.4rem;
-          text-transform: uppercase;
+          margin-bottom: 0.45rem;
         }
 
         .aivio-hero h1 {
           color: var(--aivio-text);
-          font-size: clamp(2.1rem, 6vw, 4.4rem);
-          line-height: 1.04;
-          margin: 0 0 0.7rem;
+          font-size: clamp(2.25rem, 8vw, 4rem);
+          line-height: 1.08;
+          margin: 0 0 0.75rem;
         }
 
         .aivio-hero p {
           color: var(--aivio-muted);
-          font-size: 1.05rem;
+          font-size: clamp(1.05rem, 3.5vw, 1.25rem);
           line-height: 1.65;
-          max-width: 860px;
+          margin: 0;
         }
 
-        .stage-strip {
+        .step-strip {
           display: grid;
-          grid-template-columns: repeat(6, minmax(0, 1fr));
-          gap: 0.5rem;
-          margin: 1rem 0 1.4rem;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 0.55rem;
+          margin: 1.05rem 0 1.2rem;
         }
 
-        .stage-pill {
+        .step-pill {
           border: 1px solid var(--aivio-line);
           border-radius: 8px;
           background: #fff;
           color: var(--aivio-muted);
-          padding: 0.55rem 0.65rem;
+          padding: 0.8rem 0.45rem;
           text-align: center;
-          font-size: 0.82rem;
-          font-weight: 750;
+          font-size: 0.95rem;
+          font-weight: 850;
         }
 
-        .stage-pill.active {
-          border-color: rgba(21, 94, 239, 0.5);
+        .step-pill.active {
+          border-color: rgba(21, 94, 239, 0.55);
           color: var(--aivio-blue);
-          background: #f4f7ff;
+          background: #f3f7ff;
         }
 
         .status-chip {
           display: inline-block;
           border: 1px solid var(--aivio-line);
           border-radius: 8px;
-          padding: 0.25rem 0.5rem;
           color: var(--aivio-muted);
-          font-size: 0.8rem;
-          font-weight: 700;
+          font-size: 0.95rem;
+          font-weight: 800;
+          margin: 0.15rem 0.35rem 0.15rem 0;
+          padding: 0.42rem 0.6rem;
         }
 
         .status-chip.ready {
-          border-color: rgba(20, 125, 100, 0.35);
+          border-color: rgba(20, 125, 100, 0.38);
           color: var(--aivio-green);
+          background: #f3fbf8;
         }
 
         .status-chip.warn {
-          border-color: rgba(183, 121, 31, 0.35);
+          border-color: rgba(161, 92, 0, 0.35);
           color: var(--aivio-amber);
+          background: #fff8ed;
         }
 
-        .doc-box {
+        .section-title {
+          color: var(--aivio-text);
+          font-size: 1.45rem;
+          font-weight: 850;
+          margin: 1.2rem 0 0.65rem;
+        }
+
+        .document-preview {
           border: 1px solid var(--aivio-line);
           border-radius: 8px;
           background: #fff;
-          padding: 1rem;
+          padding: 1rem 1.05rem;
         }
 
-        .stTabs [data-baseweb="tab-list"] {
-          gap: 0.4rem;
-          overflow-x: auto;
+        div[data-testid="stRadio"] label,
+        div[data-testid="stTextInput"] label,
+        div[data-testid="stTextArea"] label,
+        div[data-testid="stFileUploader"] label,
+        div[data-testid="stCameraInput"] label,
+        div[data-testid="stAudioInput"] label,
+        div[data-testid="stSelectbox"] label,
+        div[data-testid="stCheckbox"] label {
+          color: var(--aivio-text);
+          font-size: 1.08rem !important;
+          font-weight: 850 !important;
         }
 
-        .stTabs [data-baseweb="tab"] {
-          border: 1px solid var(--aivio-line);
-          border-radius: 8px;
-          padding: 0.55rem 0.8rem;
-          white-space: nowrap;
+        div[data-testid="stTextInput"] input,
+        div[data-testid="stTextArea"] textarea,
+        div[data-baseweb="select"] {
+          font-size: 1.08rem !important;
+        }
+
+        div[data-testid="stTextArea"] textarea {
+          line-height: 1.65;
+        }
+
+        .stButton > button,
+        .stDownloadButton > button,
+        div[data-testid="stLinkButton"] a {
+          border-radius: 10px;
+          font-size: 1.12rem;
+          font-weight: 850;
+          min-height: 62px;
+        }
+
+        div[data-testid="stExpander"] summary {
+          font-size: 1.05rem;
+          font-weight: 850;
         }
 
         @media (max-width: 720px) {
           .block-container {
-            padding-left: 1rem;
-            padding-right: 1rem;
+            padding-left: 0.85rem;
+            padding-right: 0.85rem;
           }
 
-          .stage-strip {
+          .step-strip {
             grid-template-columns: repeat(2, minmax(0, 1fr));
           }
         }
@@ -235,7 +267,6 @@ def secret_value(name: str, default: str = "") -> str:
         value = st.secrets.get(name, "")
     except Exception:
         value = ""
-
     return str(value or os.getenv(name, default) or "")
 
 
@@ -245,8 +276,7 @@ def secret_list(name: str, default: str = "") -> list[str]:
 
 
 def ensure_state() -> None:
-    st.session_state.setdefault("materials", [])
-    st.session_state.setdefault("approved", False)
+    st.session_state.setdefault("case", None)
 
 
 def uploaded_file_meta(file: Any, source: str) -> dict[str, Any]:
@@ -258,32 +288,13 @@ def uploaded_file_meta(file: Any, source: str) -> dict[str, Any]:
     }
 
 
-def media_type_counts(files: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {"video": 0, "image": 0, "audio": 0, "document": 0, "other": 0}
-    for item in files:
-        mime = str(item.get("type", ""))
-        name = str(item.get("name", "")).lower()
-        if mime.startswith("video/") or name.endswith((".mp4", ".mov", ".webm")):
-            counts["video"] += 1
-        elif mime.startswith("image/"):
-            counts["image"] += 1
-        elif mime.startswith("audio/") or name.endswith((".mp3", ".m4a", ".wav", ".webm", ".ogg")):
-            counts["audio"] += 1
-        elif mime == "application/pdf" or name.endswith(".pdf"):
-            counts["document"] += 1
-        else:
-            counts["other"] += 1
-    return counts
-
-
 def split_sentences(text: str) -> list[str]:
     normalized = re.sub(r"\s+", " ", text).strip()
     if not normalized:
         return []
 
     parts = re.split(r"(?<=[.!?。])\s+|(?:다\.|요\.|니다\.)\s*", normalized)
-    cleaned = [part.strip(" .\n\t") for part in parts if len(part.strip()) >= 8]
-    return cleaned[:10]
+    return [part.strip(" .\n\t") for part in parts if len(part.strip()) >= 8][:8]
 
 
 def infer_steps(text: str) -> list[str]:
@@ -293,17 +304,17 @@ def infer_steps(text: str) -> list[str]:
         if len(line.strip()) >= 8
     ]
     if len(lines) >= 3:
-        return lines[:7]
+        return lines[:6]
 
     sentences = split_sentences(text)
     if len(sentences) >= 3:
-        return sentences[:7]
+        return sentences[:6]
 
     return [
-        "음성 또는 영상 전사문을 바탕으로 작업 전 준비 상태를 확인합니다.",
-        "숙련자의 설명에서 반복되는 행동, 도구, 판단 기준을 분리합니다.",
-        "정상/이상 상황과 실패 사례를 별도 항목으로 정리합니다.",
-        "주니어가 따라 할 수 있는 작업 단위로 전환합니다.",
+        "숙련자의 설명에서 작업 준비 상태를 확인합니다.",
+        "반복되는 행동, 도구, 판단 기준을 나눕니다.",
+        "정상 상황과 위험 상황을 별도 항목으로 표시합니다.",
+        "주니어가 확인할 질문을 남깁니다.",
     ]
 
 
@@ -354,7 +365,6 @@ def sam_content_type(media_type: str) -> str:
 def sam_media_part(file: Any, suffix: str) -> dict[str, str]:
     media_type = media_type_for_file(file, suffix)
     encoded = base64.b64encode(file.getvalue()).decode("ascii")
-
     return {
         "type": sam_content_type(media_type),
         "source": "base64",
@@ -436,16 +446,25 @@ def parse_json_object(text: str) -> dict[str, Any] | None:
         return None
 
 
+def as_text_list(value: Any, fallback: list[str]) -> list[str]:
+    if isinstance(value, list):
+        cleaned = [str(item).strip() for item in value if str(item).strip()]
+        return cleaned or fallback
+    if isinstance(value, str) and value.strip():
+        return [line.strip(" -") for line in value.splitlines() if line.strip()]
+    return fallback
+
+
 def transcribe_file(file: Any) -> tuple[str, str]:
     file_name = getattr(file, "name", "audio.wav") or "audio.wav"
     suffix = Path(file_name).suffix.lower() or ".wav"
     size = getattr(file, "size", 0) or 0
 
     if suffix not in SAM_MEDIA_EXTENSIONS:
-        return "", f"{file_name}: SAM STT 미지원 형식입니다."
+        return "", f"{file_name}: 전사 미지원 형식"
 
     if size > MAX_SAM_MEDIA_BYTES:
-        return "", f"{file_name}: SAM API 처리 한도 25MB를 넘었습니다."
+        return "", f"{file_name}: 25MB 초과"
 
     try:
         transcript = sam_generate(
@@ -467,9 +486,9 @@ def transcribe_file(file: Any) -> tuple[str, str]:
             task="analyze",
             max_tokens=6000,
         )
-        return transcript, f"{file_name}: SAM STT 완료"
+        return transcript, f"{file_name}: 전사 완료"
     except Exception as exc:
-        return "", f"{file_name}: SAM STT 실패 - {exc}"
+        return "", f"{file_name}: 전사 실패 - {exc}"
 
 
 def transcribe_sources(files: list[Any]) -> tuple[str, list[str]]:
@@ -485,65 +504,72 @@ def transcribe_sources(files: list[Any]) -> tuple[str, list[str]]:
     return "\n\n".join(transcripts).strip(), statuses
 
 
-def local_knowledge_bundle(title: str, industry: str, source_text: str, files: list[dict[str, Any]]) -> dict[str, Any]:
+def local_knowledge_bundle(title: str, field: str, source_text: str, files: list[dict[str, Any]]) -> dict[str, Any]:
     steps = infer_steps(source_text)
     keywords = extract_keywords(source_text)
-    field = industry or "현장 업무"
-    file_summary = ", ".join(f"{item['source']}:{item['name']}" for item in files) or "미디어 없음"
+    file_summary = ", ".join(f"{item['source']}:{item['name']}" for item in files) or "등록 자료 없음"
+    core_text = source_text[:420] if source_text else "전사문 생성 후 보강이 필요합니다."
+
     document = f"""# {title}
 
-## 1. 노하우 개요
-- 분야: {field}
+## 한 줄 요약
+{field} 분야의 현장 경험을 영상·음성 기반으로 수집해 주니어가 검수 가능한 노하우 문서로 전환합니다.
+
+## 핵심 내용
 - 수집 자료: {file_summary}
-- 핵심 설명: {source_text[:360] if source_text else "SAM STT 또는 보완 메모가 필요합니다."}
+- 핵심 설명: {core_text}
 
-## 2. 핵심 키워드
-{", ".join(keywords) if keywords else "핵심 키워드가 아직 충분하지 않습니다."}
-
-## 3. 작업 절차
+## 작업 순서
 {chr(10).join(f"{index}. {step}" for index, step in enumerate(steps, start=1))}
 
-## 4. 주니어 협업 포인트
-- 전사문에서 장비명과 현장 용어를 확인합니다.
-- 작업 단위를 분리하고 누락된 질문을 정리합니다.
-- 시니어와 기업이 검수할 항목을 따로 표시합니다.
+## 판단 기준
+- 숙련자가 중요하게 보는 소리, 움직임, 순서, 예외 상황을 확인합니다.
+- 위험하거나 공개하면 안 되는 정보는 검수 단계에서 분리합니다.
+- 주니어가 따라 할 수 있는 단위와 반드시 질문해야 할 단위를 나눕니다.
 
-## 5. 검수 유의사항
-- 기업기밀, 개인정보, 영업비밀, 원본자료 권리를 확인합니다.
-- AI 초안은 시니어와 기업 검수 전 확정본으로 사용하지 않습니다.
+## 주니어 협업
+- 전사문과 현장 용어를 먼저 확인합니다.
+- 작업 순서, 판단 기준, 주의사항을 문서 형식으로 정리합니다.
+- 시니어와 기업 검수 질문을 남깁니다.
+
+## 검수 질문
+1. 실제 작업 순서와 문서의 순서가 맞습니까?
+2. 주니어가 혼자 수행하면 위험한 구간이 있습니까?
+3. 외부 공개가 제한되는 장면, 장비명, 고객 정보가 있습니까?
 """
+
     return {
         "document_markdown": document,
         "keywords": keywords,
         "claims": [f"{keyword} 기반 작업 판단 또는 전수 방법" for keyword in keywords[:5]],
-        "junior_work_units": steps[:5],
+        "junior_work_units": steps[:4],
         "review_questions": [
-            "이 절차가 실제 작업 순서와 맞습니까?",
-            "주니어가 독립적으로 수행하면 위험한 구간이 있습니까?",
-            "기업 외부 공개가 제한되는 장면이나 용어가 있습니까?",
+            "실제 작업 순서와 문서의 순서가 맞습니까?",
+            "주니어가 혼자 수행하면 위험한 구간이 있습니까?",
+            "외부 공개가 제한되는 장면, 장비명, 고객 정보가 있습니까?",
         ],
         "risk_notes": [
-            "촬영 동의와 공개 범위를 확인해야 합니다.",
-            "AI 초안의 현장 정확성은 시니어 검수 후 확정해야 합니다.",
+            "영상·음성에 개인정보, 영업비밀, 고객 정보가 포함될 수 있습니다.",
+            "AI 초안은 시니어와 기업 검수 전 확정본으로 사용하지 않습니다.",
         ],
     }
 
 
-def sam_knowledge_bundle(title: str, industry: str, source_text: str, files: list[dict[str, Any]]) -> dict[str, Any]:
-    fallback = local_knowledge_bundle(title, industry, source_text, files)
+def sam_knowledge_bundle(title: str, field: str, source_text: str, files: list[dict[str, Any]]) -> dict[str, Any]:
+    fallback = local_knowledge_bundle(title, field, source_text, files)
     if not secret_value("SAM_API_KEY") or not source_text.strip():
         return fallback
 
     prompt = {
         "title": title,
-        "industry": industry,
+        "field": field,
         "source_text": source_text,
         "files": files,
         "required_json": {
-            "document_markdown": "노하우 초안 Markdown",
-            "keywords": ["검색/분류 키워드"],
-            "claims": ["권리/IP 검토 후보 문장"],
-            "junior_work_units": ["주니어가 정리하거나 제작할 작업 단위"],
+            "document_markdown": "시니어 노하우 문서 Markdown",
+            "keywords": ["특허/분류 검색 키워드"],
+            "claims": ["권리화 가능성을 검토할 후보 문장"],
+            "junior_work_units": ["주니어가 보강해야 할 작업 단위"],
             "review_questions": ["시니어와 기업에게 확인할 질문"],
             "risk_notes": ["권리, 보안, 공개 범위 관련 주의사항"],
         },
@@ -554,7 +580,7 @@ def sam_knowledge_bundle(title: str, industry: str, source_text: str, files: lis
             [
                 {
                     "role": "system",
-                    "content": "Bridge-Up 운영 MVP의 AI 지식화 에이전트입니다. 반드시 JSON 객체만 반환하세요.",
+                    "content": "AIVIO Bridge-Up의 지식화 에이전트입니다. 반드시 JSON 객체만 반환하세요.",
                 },
                 {
                     "role": "user",
@@ -573,33 +599,175 @@ def sam_knowledge_bundle(title: str, industry: str, source_text: str, files: lis
 
     return {
         "document_markdown": str(parsed.get("document_markdown") or fallback["document_markdown"]),
-        "keywords": list(parsed.get("keywords") or fallback["keywords"]),
-        "claims": list(parsed.get("claims") or fallback["claims"]),
-        "junior_work_units": list(parsed.get("junior_work_units") or fallback["junior_work_units"]),
-        "review_questions": list(parsed.get("review_questions") or fallback["review_questions"]),
-        "risk_notes": list(parsed.get("risk_notes") or fallback["risk_notes"]),
+        "keywords": as_text_list(parsed.get("keywords"), fallback["keywords"]),
+        "claims": as_text_list(parsed.get("claims"), fallback["claims"]),
+        "junior_work_units": as_text_list(parsed.get("junior_work_units"), fallback["junior_work_units"]),
+        "review_questions": as_text_list(parsed.get("review_questions"), fallback["review_questions"]),
+        "risk_notes": as_text_list(parsed.get("risk_notes"), fallback["risk_notes"]),
     }
 
 
 def build_junior_tasks(work_units: list[str]) -> list[dict[str, Any]]:
     tasks = [task.copy() for task in DEFAULT_JUNIOR_TASKS]
-    for index, unit in enumerate(work_units[:4], start=1):
+    for index, unit in enumerate(work_units[:3], start=1):
         tasks.append(
             {
                 "id": f"unit-{index}",
-                "title": f"작업 단위 검토: {unit[:32]}",
-                "owner": "주니어",
+                "title": f"작업 단위 확인: {unit[:36]}",
                 "status": "대기",
-                "progress": 0,
-                "evidence": "",
-                "question": "",
+                "memo": "",
             }
         )
     return tasks
 
 
+def secret_json_object(name: str) -> dict[str, Any]:
+    raw = secret_value(name)
+    if not raw.strip():
+        return {}
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def kiprisplus_endpoint() -> str:
+    endpoint = secret_value("KIPRISPLUS_ENDPOINT", KIPRISPLUS_DEFAULT_ENDPOINT).strip()
+    if endpoint.startswith(("http://", "https://")):
+        return endpoint
+    if endpoint.startswith("/"):
+        return f"{KIPRISPLUS_BASE_URL}{endpoint}"
+    return f"{KIPRISPLUS_BASE_URL}/{endpoint.lstrip('/')}"
+
+
+def kiprisplus_query_param(endpoint: str) -> str:
+    configured = secret_value("KIPRISPLUS_QUERY_PARAM")
+    if configured:
+        return configured
+    if "getBibliographySumryInfoSearch" in endpoint:
+        return "applicationNumber"
+    return "word"
+
+
+def strip_xml_tag(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def xml_element_to_dict(element: ET.Element) -> dict[str, Any] | str:
+    children = list(element)
+    if not children:
+        return (element.text or "").strip()
+
+    data: dict[str, Any] = {}
+    for child in children:
+        key = strip_xml_tag(child.tag)
+        value = xml_element_to_dict(child)
+        if key in data:
+            existing = data[key]
+            if isinstance(existing, list):
+                existing.append(value)
+            else:
+                data[key] = [existing, value]
+        else:
+            data[key] = value
+
+    text = (element.text or "").strip()
+    if text:
+        data["_text"] = text
+    return data
+
+
+def parse_kiprisplus_payload(payload: bytes) -> dict[str, Any]:
+    decoded = payload.decode("utf-8", errors="replace")
+    try:
+        parsed_json = json.loads(decoded)
+        items = parsed_json.get("items") or parsed_json.get("item") or []
+        if isinstance(items, dict):
+            items = [items]
+        return {
+            "items": items if isinstance(items, list) else [],
+            "message": str(parsed_json.get("message") or parsed_json.get("resultMsg") or ""),
+            "raw_preview": decoded[:1200],
+        }
+    except json.JSONDecodeError:
+        pass
+
+    root = ET.fromstring(payload)
+    result_message = ""
+    for node in root.iter():
+        if strip_xml_tag(node.tag) in {"resultMsg", "resultMessage"}:
+            result_message = (node.text or "").strip()
+            break
+
+    items = []
+    for item in root.iter():
+        if strip_xml_tag(item.tag) == "item":
+            parsed_item = xml_element_to_dict(item)
+            if isinstance(parsed_item, dict):
+                items.append(parsed_item)
+
+    return {
+        "items": items,
+        "message": result_message,
+        "raw_preview": decoded[:1200],
+    }
+
+
+def call_kiprisplus_search(query: str, limit: int = 5) -> dict[str, Any]:
+    api_key = secret_value("KIPRISPLUS_API_KEY")
+    if not api_key:
+        raise RuntimeError("KIPRISPLUS_API_KEY가 없습니다. Streamlit Cloud Secrets에 등록해 주세요.")
+
+    endpoint = kiprisplus_endpoint()
+    query_param = kiprisplus_query_param(endpoint)
+    params: dict[str, Any] = {
+        "pageNo": "1",
+        "numOfRows": str(limit),
+    }
+    params.update(secret_json_object("KIPRISPLUS_EXTRA_PARAMS"))
+    params[query_param] = query
+    params["ServiceKey"] = api_key
+
+    separator = "&" if "?" in endpoint else "?"
+    url = f"{endpoint}{separator}{urlencode(params, safe='%')}"
+    request = urllib.request.Request(url, method="GET")
+
+    try:
+        with urllib.request.urlopen(request, timeout=40) as response:
+            payload = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"KIPRISPlus API 오류 {exc.code}: {detail[:500]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"KIPRISPlus API 연결 실패: {exc.reason}") from exc
+
+    parsed = parse_kiprisplus_payload(payload)
+    parsed["endpoint"] = endpoint
+    parsed["query_param"] = query_param
+    parsed["query"] = query
+    parsed["count"] = len(parsed.get("items", []))
+    return parsed
+
+
+def patent_item_value(item: dict[str, Any], keys: list[str]) -> str:
+    lowered = {str(key).lower(): value for key, value in item.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value is None:
+            continue
+        if isinstance(value, list):
+            return ", ".join(str(part) for part in value if str(part).strip())
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value).strip()
+    return ""
+
+
 def build_patent_review(document: str, keywords: list[str], claims: list[str]) -> dict[str, Any]:
-    keywords = keywords or extract_keywords(document, 16)
+    keywords = keywords or extract_keywords(document, 12)
     claims = claims or [f"{keyword} 기반 작업 판단 또는 전수 방법" for keyword in keywords[:5]]
     query = " ".join(keywords[:6])
     kipris_url = "https://www.kipris.or.kr/"
@@ -622,44 +790,45 @@ def build_patent_review(document: str, keywords: list[str], claims: list[str]) -
         "notes": [
             "이 결과는 자동 예비 검토이며 등록 가능 여부의 법적 판단이 아닙니다.",
             "실제 등록 가능성은 신규성, 진보성, 산업상 이용가능성, 공개 이력, 청구항 작성에 따라 달라집니다.",
-            "운영 버전에서는 KIPRISPlus API로 발명의 명칭, 초록, 청구범위, IPC/CPC를 검색해 유사 문헌을 비교해야 합니다.",
+            "운영 버전에서는 KIPRISPlus API로 유사 문헌을 비교해야 합니다.",
         ],
     }
 
 
-def build_material(
-    project_context: dict[str, Any],
-    consent_scope: str,
+def build_case(
+    context: dict[str, Any],
     files: list[dict[str, Any]],
     transcript: str,
     stt_status: list[str],
     memo: str,
 ) -> dict[str, Any]:
-    title = str(project_context.get("title") or "현장 노하우")
-    industry = str(project_context.get("industry") or "현장 업무")
-    source_text = "\n".join(part for part in [transcript, memo] if part.strip())
-    bundle = sam_knowledge_bundle(title, industry, source_text, files)
+    title = str(context.get("title") or "현장 노하우")
+    field = str(context.get("field") or "현장 업무")
+    source_text = "\n".join(
+        part
+        for part in [
+            transcript,
+            context.get("purpose", ""),
+            memo,
+        ]
+        if str(part).strip()
+    )
+    bundle = sam_knowledge_bundle(title, field, source_text, files)
     document = str(bundle["document_markdown"])
-    patent_review = build_patent_review(document, list(bundle["keywords"]), list(bundle["claims"]))
-    counts = media_type_counts(files)
-    junior_tasks = build_junior_tasks(list(bundle["junior_work_units"]))
 
     return {
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "workflow_stage": "ai_drafted",
+        "stage": "draft",
         "title": title,
-        "industry": industry,
-        "consent_scope": consent_scope,
-        "project_context": project_context,
+        "field": field,
+        "context": context,
         "files": files,
         "transcript": transcript,
         "stt_status": stt_status,
         "memo": memo,
         "document": document,
-        "patent_review": patent_review,
         "collaboration": {
-            "junior_brief": "AI 초안을 기준으로 주니어가 작업 단위를 정리하고, 시니어·기업 검수 질문을 분리합니다.",
-            "junior_tasks": junior_tasks,
+            "junior_tasks": build_junior_tasks(list(bundle["junior_work_units"])),
             "review_questions": list(bundle["review_questions"]),
             "risk_notes": list(bundle["risk_notes"]),
             "activity_log": [
@@ -670,40 +839,26 @@ def build_material(
                 }
             ],
         },
-        "senior_review": {
-            "checks": {},
-            "feedback": "",
-            "approved": False,
+        "review": {
+            "senior_ok": False,
+            "company_ok": False,
+            "memo": "",
         },
-        "company_review": {
-            "checks": {},
-            "feedback": "",
-            "approved": False,
-        },
-        "analysis": {
-            "source_count": len(files),
-            "media_counts": counts,
-            "steps": infer_steps(source_text),
-            "keywords": patent_review["keywords"],
-            "summary": f"{industry} 자료를 SAM 기반으로 전사·초안화하고 주니어 협업 상태로 전환했습니다.",
-        },
+        "patent_review": build_patent_review(document, list(bundle["keywords"]), list(bundle["claims"])),
     }
 
 
-def latest_material() -> dict[str, Any] | None:
-    if not st.session_state["materials"]:
-        return None
-    return st.session_state["materials"][-1]
-
-
-def stage_index(stage: str) -> int:
-    keys = [key for key, _ in PIPELINE_STAGES]
+def case_step_index(case: dict[str, Any] | None) -> int:
+    if case is None:
+        return 0
+    keys = [key for key, _ in STEP_LABELS]
+    stage = str(case.get("stage", "capture"))
     return keys.index(stage) if stage in keys else 0
 
 
-def set_stage(material: dict[str, Any], stage: str, actor: str, event: str) -> None:
-    material["workflow_stage"] = stage
-    material.setdefault("collaboration", {}).setdefault("activity_log", []).append(
+def set_stage(case: dict[str, Any], stage: str, actor: str, event: str) -> None:
+    case["stage"] = stage
+    case.setdefault("collaboration", {}).setdefault("activity_log", []).append(
         {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "actor": actor,
@@ -712,467 +867,375 @@ def set_stage(material: dict[str, Any], stage: str, actor: str, event: str) -> N
     )
 
 
-def task_progress(material: dict[str, Any] | None) -> int:
-    if material is None:
+def task_progress(case: dict[str, Any] | None) -> int:
+    if case is None:
         return 0
-    tasks = material.get("collaboration", {}).get("junior_tasks", [])
+    tasks = case.get("collaboration", {}).get("junior_tasks", [])
     if not tasks:
         return 0
-    return int(sum(int(task.get("progress", 0)) for task in tasks) / len(tasks))
+    done = sum(1 for task in tasks if task.get("status") == "완료")
+    return int(done / len(tasks) * 100)
 
 
 def render_hero() -> None:
     st.markdown(
         """
         <div class="aivio-hero">
-          <div class="aivio-kicker">AIVIO / Bridge-Up Streamlit MVP</div>
-          <h1>AI 초안을 주니어 협업과 현장 검수로 완성합니다.</h1>
-          <p>
-            기업 과제와 시니어 노하우를 영상·음성·문서로 수집하고, SAM API가 만든 초안을
-            주니어가 구조화한 뒤 시니어와 기업이 검수하는 관리형 프로젝트 흐름입니다.
-          </p>
+          <div class="aivio-kicker">AIVIO Bridge-Up</div>
+          <h1>말로 남기면, AI가 노하우 문서로 정리합니다.</h1>
+          <p>영상과 음성을 바탕으로 시니어 경험을 문서화하고, 주니어 협업과 검수까지 이어갑니다.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_stage_strip(material: dict[str, Any] | None) -> None:
-    active = stage_index(material.get("workflow_stage", "collected")) if material else -1
-    html = ['<div class="stage-strip">']
-    for index, (_, label) in enumerate(PIPELINE_STAGES):
-        class_name = "stage-pill active" if index <= active else "stage-pill"
+def render_step_strip(case: dict[str, Any] | None) -> None:
+    active = case_step_index(case)
+    html = ['<div class="step-strip">']
+    for index, (_, label) in enumerate(STEP_LABELS):
+        class_name = "step-pill active" if index <= active else "step-pill"
         html.append(f'<div class="{class_name}">{label}</div>')
     html.append("</div>")
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def render_status_cards(material: dict[str, Any] | None) -> None:
-    count = 0 if material is None else int(material["analysis"]["source_count"])
-    stage = "대기" if material is None else PIPELINE_LABELS.get(material.get("workflow_stage", ""), "대기")
-    progress = task_progress(material)
-    review_state = "완료" if material and material.get("workflow_stage") == "approved" else "진행"
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("입력 자료", count)
-    col2.metric("현재 단계", stage)
-    col3.metric("주니어 진행률", f"{progress}%")
-    col4.metric("검수 상태", review_state if material else "대기")
-
-
-def render_capture_tab() -> None:
-    st.subheader("과제·노하우 등록")
-    st.caption("기업 과제형과 시니어 노하우형을 같은 구조로 받고, 이후 주니어 협업과 검수 상태로 넘깁니다.")
-
-    if secret_value("SAM_API_KEY"):
-        st.markdown('<span class="status-chip ready">SAM_API_KEY 연결됨 · SAM 지식화 가능</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="status-chip warn">SAM_API_KEY 없음 · 로컬 초안만 생성</span>', unsafe_allow_html=True)
-
-    type_col, meta_col = st.columns([0.72, 1.28], gap="large")
-    with type_col:
-        intake_type = st.radio("등록 유형", ["기업 과제형", "시니어 노하우형"], horizontal=False)
-        consent_scope = st.selectbox(
-            "공개 및 검수 범위",
-            ["비공개 보관", "멘토 검수 허용", "주니어 학습 콘텐츠 활용 허용"],
-        )
-    with meta_col:
-        title = st.text_input("과제/노하우 제목", placeholder="예: CNC 설비 이상 소리 판별 노하우")
-        industry = st.text_input("분야", placeholder="제조, 품질, 물류, 교육")
-        company_name = st.text_input("기업명", placeholder="실증 또는 과제 제시 기업")
-
-    role_col1, role_col2, role_col3 = st.columns(3)
-    senior_name = role_col1.text_input("시니어/숙련자", placeholder="검수자")
-    junior_name = role_col2.text_input("주니어", placeholder="정리·제작 담당")
-    company_reviewer = role_col3.text_input("기업 검수자", placeholder="현장 적용 검토")
-
-    objective = st.text_area(
-        "과제 목적",
-        height=90,
-        placeholder="기업이 해결하려는 문제, 시니어가 전수하려는 핵심 경험, 주니어가 만들어야 할 방향을 적어 주세요.",
+def render_navigation(case: dict[str, Any] | None) -> str:
+    labels = [label for _, label in STEP_LABELS]
+    keys = [key for key, _ in STEP_LABELS]
+    selected = st.selectbox(
+        "화면",
+        labels,
+        index=case_step_index(case),
     )
-    acceptance_criteria = st.text_area(
-        "완료 기준",
-        height=80,
-        placeholder="검수 기준, 현장 적용 기준, 공개 제한 조건을 간단히 적어 주세요.",
+    return keys[labels.index(selected)]
+
+
+def render_api_status() -> None:
+    sam_ready = bool(secret_value("SAM_API_KEY"))
+    chip_class = "ready" if sam_ready else "warn"
+    label = "SAM 연결됨" if sam_ready else "SAM 키 필요"
+    st.markdown(f'<span class="status-chip {chip_class}">{label}</span>', unsafe_allow_html=True)
+
+
+def render_capture() -> None:
+    st.markdown('<div class="section-title">자료 입력</div>', unsafe_allow_html=True)
+    render_api_status()
+
+    title = st.text_input("제목", placeholder="예: 설비 이상 소리 판별 노하우")
+    intake_type = st.selectbox("유형", ["시니어 노하우", "기업 과제"])
+    company_name = st.text_input("기업명", placeholder="선택 입력")
+
+    st.markdown('<div class="section-title">자료</div>', unsafe_allow_html=True)
+    recorded_audio = st.audio_input("음성 녹음")
+    video_files = st.file_uploader(
+        "영상 업로드",
+        type=["mp4", "mov", "webm"],
+        accept_multiple_files=True,
+        key="video-upload",
+    )
+    photo_file = st.camera_input("사진 촬영")
+    extra_files = st.file_uploader(
+        "파일 업로드",
+        type=["mp3", "m4a", "wav", "webm", "ogg", "jpg", "jpeg", "png", "webp", "pdf", "txt", "docx"],
+        accept_multiple_files=True,
+        key="file-upload",
     )
 
-    st.divider()
-    audio_col, video_col, file_col = st.columns(3)
-    with audio_col:
-        st.markdown("#### 음성 녹음")
-        recorded_audio = st.audio_input("현장 설명 녹음")
-    with video_col:
-        st.markdown("#### 영상 업로드")
-        video_files = st.file_uploader(
-            "작업 영상",
-            type=["mp4", "webm", "mov"],
-            accept_multiple_files=True,
-        )
-    with file_col:
-        st.markdown("#### 음성·문서 업로드")
-        extra_files = st.file_uploader(
-            "음성, 이미지, PDF",
-            type=["mp3", "m4a", "wav", "webm", "ogg", "jpg", "jpeg", "png", "webp", "pdf"],
-            accept_multiple_files=True,
-        )
+    with st.expander("추가 정보"):
+        field = st.text_input("분야", placeholder="제조, 품질, 물류, 교육")
+        purpose = st.text_area("목적", height=90, placeholder="해결하려는 문제나 전수하려는 경험")
+        senior_name = st.text_input("시니어", placeholder="선택 입력")
+        junior_name = st.text_input("주니어", placeholder="선택 입력")
+        reviewer_name = st.text_input("기업 검수자", placeholder="선택 입력")
+        memo = st.text_area("보완 메모", height=100, placeholder="장비명, 현장 용어, 공개 금지 정보")
 
-    memo = st.text_area(
-        "보완 메모",
-        height=90,
-        placeholder="STT가 놓치기 쉬운 장비명, 현장 용어, 금지 공개 정보만 짧게 적어 주세요.",
-    )
-
-    submitted = st.button("SAM 지식화 초안 생성", type="primary", use_container_width=True)
-    if submitted:
+    if st.button("AI로 정리하기", type="primary", use_container_width=True):
         source_files: list[Any] = []
         file_meta: list[dict[str, Any]] = []
 
         if recorded_audio is not None:
             source_files.append(recorded_audio)
-            file_meta.append(uploaded_file_meta(recorded_audio, "현장 음성 녹음"))
+            file_meta.append(uploaded_file_meta(recorded_audio, "음성 녹음"))
 
         for file in video_files or []:
             source_files.append(file)
-            file_meta.append(uploaded_file_meta(file, "작업 영상"))
+            file_meta.append(uploaded_file_meta(file, "영상"))
+
+        if photo_file is not None:
+            file_meta.append(uploaded_file_meta(photo_file, "사진"))
 
         for file in extra_files or []:
-            file_meta.append(uploaded_file_meta(file, "추가 파일"))
+            file_meta.append(uploaded_file_meta(file, "파일"))
             name = str(getattr(file, "name", "")).lower()
             mime = str(getattr(file, "type", ""))
-            if mime.startswith("audio/") or name.endswith(tuple(SAM_MEDIA_EXTENSIONS)):
+            if mime.startswith("audio/") or mime.startswith("video/") or name.endswith(tuple(SAM_MEDIA_EXTENSIONS)):
                 source_files.append(file)
 
         if not title.strip():
-            st.error("과제/노하우 제목은 필요합니다.")
+            st.error("제목은 필요합니다.")
             return
 
-        if not source_files and not memo.strip() and not objective.strip():
-            st.error("영상·음성 자료, 보완 메모, 과제 목적 중 하나는 필요합니다.")
+        if source_files and not secret_value("SAM_API_KEY"):
+            st.error("영상·음성 전사를 하려면 Streamlit Secrets에 SAM_API_KEY를 먼저 등록해야 합니다.")
             return
 
-        project_context = {
+        if not source_files and not str(purpose).strip() and not str(memo).strip():
+            st.error("음성, 영상, 목적, 보완 메모 중 하나는 필요합니다.")
+            return
+
+        context = {
+            "title": title.strip(),
             "intake_type": intake_type,
-            "title": title,
-            "industry": industry,
-            "company_name": company_name,
-            "senior_name": senior_name,
-            "junior_name": junior_name,
-            "company_reviewer": company_reviewer,
-            "objective": objective,
-            "acceptance_criteria": acceptance_criteria,
+            "company_name": company_name.strip(),
+            "field": field.strip() or "현장 업무",
+            "purpose": purpose.strip(),
+            "senior_name": senior_name.strip(),
+            "junior_name": junior_name.strip(),
+            "reviewer_name": reviewer_name.strip(),
         }
 
-        with st.spinner("SAM 기반 전사와 AI 초안 생성을 진행하고 있습니다."):
+        with st.spinner("전사와 AI 정리를 진행하고 있습니다."):
             transcript, statuses = transcribe_sources(source_files)
-            material = build_material(project_context, consent_scope, file_meta, transcript, statuses, memo)
+            st.session_state["case"] = build_case(context, file_meta, transcript, statuses, memo.strip())
 
-        st.session_state["materials"].append(material)
-        st.session_state["approved"] = False
-        st.success("AI 초안이 생성되었습니다. 주니어 협업 탭에서 작업을 이어가세요.")
+        st.rerun()
 
 
-def render_stt_tab(material: dict[str, Any] | None) -> None:
-    st.subheader("자료 전사")
-    if material is None:
-        st.info("먼저 과제·노하우 등록 탭에서 자료를 등록해 주세요.")
+def render_draft(case: dict[str, Any] | None) -> None:
+    st.markdown('<div class="section-title">AI 정리 결과</div>', unsafe_allow_html=True)
+    if case is None:
+        st.info("먼저 자료를 입력해 주세요.")
         return
 
-    for status in material.get("stt_status", []):
-        if "완료" in status:
-            st.success(status)
-        else:
-            st.warning(status)
+    statuses = case.get("stt_status", [])
+    if statuses:
+        with st.expander("전사 상태"):
+            for status in statuses:
+                if "완료" in status:
+                    st.success(status)
+                else:
+                    st.warning(status)
 
-    transcript = material.get("transcript", "")
-    if transcript:
-        material["transcript"] = st.text_area("전사문", value=transcript, height=320)
-    else:
-        st.info("전사문이 아직 없습니다. Streamlit secrets에 SAM_API_KEY를 등록하면 SAM 기반 전사가 실행됩니다.")
+    st.markdown('<div class="document-preview">', unsafe_allow_html=True)
+    st.markdown(case.get("document", ""))
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if material.get("memo"):
-        material["memo"] = st.text_area("보완 메모", value=material["memo"], height=110)
+    with st.expander("문서 직접 수정"):
+        case["document"] = st.text_area("문서", value=case.get("document", ""), height=420)
+
+    if st.button("주니어 협업으로 넘기기", type="primary", use_container_width=True):
+        set_stage(case, "collab", "운영자", "주니어 협업 시작")
+        st.rerun()
+
+    if st.button("다시 정리하기", use_container_width=True):
+        source_text = "\n".join(part for part in [case.get("transcript", ""), case.get("memo", "")] if part.strip())
+        bundle = sam_knowledge_bundle(case["title"], case["field"], source_text, case.get("files", []))
+        case["document"] = str(bundle["document_markdown"])
+        case["patent_review"] = build_patent_review(case["document"], list(bundle["keywords"]), list(bundle["claims"]))
+        case["collaboration"]["review_questions"] = list(bundle["review_questions"])
+        case["collaboration"]["risk_notes"] = list(bundle["risk_notes"])
+        set_stage(case, "draft", "AI", "AI 재정리")
+        st.rerun()
 
 
-def render_ai_draft_tab(material: dict[str, Any] | None) -> None:
-    st.subheader("AI 초안")
-    if material is None:
-        st.info("자료 등록 후 AI 초안이 생성됩니다.")
+def render_collaboration(case: dict[str, Any] | None) -> None:
+    st.markdown('<div class="section-title">협업 검수</div>', unsafe_allow_html=True)
+    if case is None:
+        st.info("AI 정리 후 협업 검수를 진행할 수 있습니다.")
         return
 
-    context = material.get("project_context", {})
-    st.caption(f"{context.get('intake_type', '등록')} · {context.get('company_name') or '기업명 미입력'}")
-    material["document"] = st.text_area("AI 초안", value=material["document"], height=430)
-
-    col1, col2 = st.columns(2)
-    if col1.button("주니어 협업 시작", type="primary", use_container_width=True):
-        set_stage(material, "junior_editing", "운영자", "주니어 협업 시작")
-        st.success("주니어 협업 단계로 전환했습니다.")
-    if col2.button("AI 초안 재생성", use_container_width=True):
-        source_text = "\n".join(part for part in [material.get("transcript", ""), material.get("memo", "")] if part.strip())
-        bundle = sam_knowledge_bundle(material["title"], material["industry"], source_text, material.get("files", []))
-        material["document"] = str(bundle["document_markdown"])
-        material["patent_review"] = build_patent_review(material["document"], list(bundle["keywords"]), list(bundle["claims"]))
-        material["collaboration"]["review_questions"] = list(bundle["review_questions"])
-        material["collaboration"]["risk_notes"] = list(bundle["risk_notes"])
-        set_stage(material, "ai_drafted", "AI", "AI 초안 재생성")
-        st.success("AI 초안을 다시 생성했습니다.")
-
-
-def render_junior_collaboration_tab(material: dict[str, Any] | None) -> None:
-    st.subheader("주니어 협업")
-    if material is None:
-        st.info("AI 초안 생성 후 주니어 협업을 진행할 수 있습니다.")
-        return
-
-    collaboration = material.setdefault("collaboration", {})
+    collaboration = case.setdefault("collaboration", {})
     tasks = collaboration.setdefault("junior_tasks", [task.copy() for task in DEFAULT_JUNIOR_TASKS])
-    context = material.get("project_context", {})
+    review = case.setdefault("review", {"senior_ok": False, "company_ok": False, "memo": ""})
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("주니어", context.get("junior_name") or "미정")
-    col2.metric("진행률", f"{task_progress(material)}%")
-    col3.metric("현재 단계", PIPELINE_LABELS.get(material.get("workflow_stage", ""), "대기"))
+    st.progress(task_progress(case) / 100, text=f"주니어 작업 {task_progress(case)}%")
 
-    collaboration["junior_brief"] = st.text_area(
-        "주니어 작업 브리프",
-        value=collaboration.get("junior_brief", ""),
-        height=100,
-        placeholder="주니어가 AI 초안을 어떤 방향으로 정리·제작해야 하는지 적습니다.",
-    )
-
-    st.markdown("#### 작업 보드")
     for index, task in enumerate(tasks):
-        with st.container(border=True):
-            title_col, owner_col, status_col = st.columns([1.3, 0.7, 0.8])
-            task["title"] = title_col.text_input("작업명", value=task.get("title", ""), key=f"junior-title-{index}")
-            task["owner"] = owner_col.text_input("담당", value=task.get("owner", "주니어"), key=f"junior-owner-{index}")
-            task["status"] = status_col.selectbox(
-                "상태",
-                STATUS_OPTIONS,
-                index=STATUS_OPTIONS.index(task.get("status", "대기")) if task.get("status") in STATUS_OPTIONS else 0,
-                key=f"junior-status-{index}",
-            )
-            task["progress"] = st.slider(
-                "진행률",
-                0,
-                100,
-                int(task.get("progress", 0)),
-                5,
-                key=f"junior-progress-{index}",
-            )
-            evidence_col, question_col = st.columns(2)
-            task["evidence"] = evidence_col.text_area(
-                "작업 메모/산출 링크",
-                value=task.get("evidence", ""),
+        done = task.get("status") == "완료"
+        checked = st.checkbox(task.get("title", "작업 확인"), value=done, key=f"task-done-{index}")
+        task["status"] = "완료" if checked else "진행"
+
+    with st.expander("주니어 메모"):
+        for index, task in enumerate(tasks):
+            task["memo"] = st.text_area(
+                task.get("title", f"작업 {index + 1}"),
+                value=task.get("memo", ""),
                 height=80,
-                key=f"junior-evidence-{index}",
-            )
-            task["question"] = question_col.text_area(
-                "검수 질문",
-                value=task.get("question", ""),
-                height=80,
-                key=f"junior-question-{index}",
+                key=f"task-memo-{index}",
             )
 
-    add_col, review_col = st.columns(2)
-    new_task = add_col.text_input("추가 작업", placeholder="필요한 주니어 작업을 추가")
-    if add_col.button("작업 추가", use_container_width=True) and new_task.strip():
-        tasks.append(
-            {
-                "id": f"custom-{len(tasks) + 1}",
-                "title": new_task.strip(),
-                "owner": context.get("junior_name") or "주니어",
-                "status": "대기",
-                "progress": 0,
-                "evidence": "",
-                "question": "",
-            }
-        )
-        set_stage(material, "junior_editing", "주니어", "협업 작업 추가")
-        st.success("작업을 추가했습니다.")
+    st.markdown('<div class="section-title">검수 확인</div>', unsafe_allow_html=True)
+    review["senior_ok"] = st.checkbox(
+        "시니어가 내용과 순서를 확인했습니다.",
+        value=bool(review.get("senior_ok", False)),
+        key="senior-ok",
+    )
+    review["company_ok"] = st.checkbox(
+        "기업 공개 범위와 보안 정보를 확인했습니다.",
+        value=bool(review.get("company_ok", False)),
+        key="company-ok",
+    )
+    review["memo"] = st.text_area("검수 메모", value=review.get("memo", ""), height=110)
 
-    if review_col.button("시니어 검수 요청", type="primary", use_container_width=True):
-        for task in tasks:
-            if task.get("status") == "진행":
-                task["status"] = "검수요청"
-        set_stage(material, "senior_review", "주니어", "시니어 검수 요청")
-        st.success("시니어 검수 단계로 전환했습니다.")
-
-    with st.expander("AI가 만든 검수 질문"):
+    with st.expander("AI 검수 질문"):
         for question in collaboration.get("review_questions", []):
             st.write(f"- {question}")
 
+    if st.button("수정 필요", use_container_width=True):
+        set_stage(case, "collab", "검수자", "수정 필요")
+        st.warning("주니어 협업 상태로 남겨 두었습니다.")
 
-def render_review_tab(material: dict[str, Any] | None) -> None:
-    st.subheader("시니어·기업 검수")
-    if material is None:
-        st.info("주니어 협업 이후 검수를 진행할 수 있습니다.")
+    can_finish = bool(review.get("senior_ok")) and bool(review.get("company_ok"))
+    if st.button("최종 결과 보기", type="primary", disabled=not can_finish, use_container_width=True):
+        set_stage(case, "result", "검수자", "최종 결과 확인")
+        st.rerun()
+
+
+def render_kiprisplus_item(item: dict[str, Any], index: int) -> None:
+    title = patent_item_value(
+        item,
+        ["inventionTitle", "title", "korTitle", "articleTitle", "발명의명칭"],
+    )
+    application_number = patent_item_value(
+        item,
+        ["applicationNumber", "applicationNo", "applNo", "applno", "출원번호"],
+    )
+    applicant = patent_item_value(
+        item,
+        ["applicantName", "applicant", "applicantNames", "출원인"],
+    )
+    application_date = patent_item_value(
+        item,
+        ["applicationDate", "filingDate", "openDate", "registrationDate", "출원일자"],
+    )
+    summary = patent_item_value(
+        item,
+        ["astrtCont", "abstract", "summary", "bibliographySummary", "초록"],
+    )
+
+    display_title = title or application_number or f"검색 결과 {index}"
+    st.markdown(f"#### {index}. {display_title}")
+    if application_number:
+        st.write(f"출원번호: `{application_number}`")
+    if applicant:
+        st.write(f"출원인: {applicant}")
+    if application_date:
+        st.write(f"일자: {application_date}")
+    if summary:
+        st.write(summary[:500])
+
+    with st.expander("원문 응답 필드"):
+        st.json(item)
+
+
+def render_result(case: dict[str, Any] | None) -> None:
+    st.markdown('<div class="section-title">최종 결과</div>', unsafe_allow_html=True)
+    if case is None:
+        st.info("자료 입력 후 결과를 확인할 수 있습니다.")
         return
 
-    senior = material.setdefault("senior_review", {"checks": {}, "feedback": "", "approved": False})
-    company = material.setdefault("company_review", {"checks": {}, "feedback": "", "approved": False})
-    context = material.get("project_context", {})
-
-    senior_items = [
-        "전사문과 현장 용어가 맞다.",
-        "작업 순서와 판단 기준이 현장과 맞다.",
-        "주니어 작업 메모의 누락 질문을 확인했다.",
-        "외부 공개 제한 정보가 표시되어 있다.",
-    ]
-    company_items = [
-        "기업 과제 목적과 결과물 방향이 맞다.",
-        "현장 적용 또는 내부 검토에 사용할 수 있다.",
-        "개인정보·영업비밀·권리 범위를 확인했다.",
-        "완료 기준과 수정 요청 사항이 정리되어 있다.",
-    ]
-
-    senior_col, company_col = st.columns(2, gap="large")
-    with senior_col:
-        st.markdown(f"#### 시니어 검수 · {context.get('senior_name') or '미정'}")
-        senior_checks = senior.setdefault("checks", {})
-        for index, item in enumerate(senior_items):
-            senior_checks[item] = st.checkbox(
-                item,
-                value=bool(senior_checks.get(item, False)),
-                key=f"senior-check-{index}",
-            )
-        senior["feedback"] = st.text_area("시니어 피드백", value=senior.get("feedback", ""), height=130)
-        senior["approved"] = all(senior_checks.get(item, False) for item in senior_items)
-
-    with company_col:
-        st.markdown(f"#### 기업 검수 · {context.get('company_reviewer') or '미정'}")
-        company_checks = company.setdefault("checks", {})
-        for index, item in enumerate(company_items):
-            company_checks[item] = st.checkbox(
-                item,
-                value=bool(company_checks.get(item, False)),
-                key=f"company-check-{index}",
-            )
-        company["feedback"] = st.text_area("기업 피드백", value=company.get("feedback", ""), height=130)
-        company["approved"] = all(company_checks.get(item, False) for item in company_items)
-
-    request_col, company_col, approve_col = st.columns(3)
-    if request_col.button("주니어 수정 요청", use_container_width=True):
-        set_stage(material, "junior_editing", "검수자", "주니어 수정 요청")
-        st.warning("주니어 협업 단계로 되돌렸습니다.")
-
-    if company_col.button("기업 검수로 넘기기", disabled=not senior["approved"], use_container_width=True):
-        set_stage(material, "company_review", "시니어", "기업 검수 요청")
-        st.success("기업 검수 단계로 전환했습니다.")
-
-    if approve_col.button("최종 승인", type="primary", disabled=not (senior["approved"] and company["approved"]), use_container_width=True):
-        set_stage(material, "approved", "기업", "최종 승인")
-        st.session_state["approved"] = True
-        st.success("최종 승인되었습니다.")
-
-    with st.expander("권리·보안 리스크"):
-        for note in material.get("collaboration", {}).get("risk_notes", []):
-            st.write(f"- {note}")
-
-
-def render_patent_tab(material: dict[str, Any] | None) -> None:
-    st.subheader("특허 등록 가능성 예비 검토")
-    if material is None:
-        st.info("노하우 문서가 생성되면 특허 검색 키워드와 예비 검토가 표시됩니다.")
-        return
-
-    review = material["patent_review"]
-    col1, col2 = st.columns([0.7, 0.3], gap="large")
-    with col1:
-        st.markdown(f"### {review['readiness']}")
-        st.write("이 단계는 자동 예비 검토입니다. 최종 등록 가능성은 변리사 또는 특허 전문가 검토가 필요합니다.")
-    with col2:
-        kipris_key_ready = bool(secret_value("KIPRISPLUS_API_KEY"))
-        chip = "ready" if kipris_key_ready else "warn"
-        label = "KIPRISPlus API 키 연결됨" if kipris_key_ready else "KIPRISPlus API 키 없음"
-        st.markdown(f'<span class="status-chip {chip}">{label}</span>', unsafe_allow_html=True)
-
-    st.markdown("#### 선행기술 검색 키워드")
-    st.write(", ".join(review["keywords"]) if review["keywords"] else "추출된 키워드가 없습니다.")
-
-    st.markdown("#### 청구항 후보 문장")
-    for claim in review["claims"]:
-        st.write(f"- {claim}")
-
-    st.markdown("#### 검색 경로")
-    st.write(f"- KIPRIS 검색: {review['kipris_url']}")
-    st.write(f"- KIPRISPlus API 상품: {review['kipris_plus_url']}")
-    st.code(review["query"] or "검색어 없음", language="text")
-
-
-def render_report_tab(material: dict[str, Any] | None) -> None:
-    st.subheader("운영 리포트")
-    if material is None:
-        st.info("자료 등록 후 리포트를 생성할 수 있습니다.")
-        return
+    st.markdown('<div class="document-preview">', unsafe_allow_html=True)
+    st.markdown(case.get("document", ""))
+    st.markdown("</div>", unsafe_allow_html=True)
 
     report = {
         "service": "AIVIO Bridge-Up",
         "generated_at": datetime.now().isoformat(timespec="minutes"),
-        "workflow_stage": material.get("workflow_stage"),
-        "project_context": material.get("project_context"),
-        "material": material,
-        "junior_progress": task_progress(material),
+        "case": case,
+        "junior_progress": task_progress(case),
     }
 
-    st.markdown("#### 협업 요약")
-    st.write(
-        f"{material['industry']} 자료 {material['analysis']['source_count']}건을 기반으로 "
-        f"현재 `{PIPELINE_LABELS.get(material.get('workflow_stage'), '대기')}` 단계입니다. "
-        f"주니어 협업 진행률은 {task_progress(material)}%입니다."
-    )
-
-    log = material.get("collaboration", {}).get("activity_log", [])
-    if log:
-        st.markdown("#### 활동 기록")
-        st.dataframe(log, use_container_width=True, hide_index=True)
-
     st.download_button(
-        "JSON 리포트 다운로드",
+        "문서 다운로드",
+        data=case.get("document", ""),
+        file_name="aivio_knowledge_document.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+    st.download_button(
+        "JSON 다운로드",
         data=json.dumps(report, ensure_ascii=False, indent=2),
         file_name="aivio_bridge_up_report.json",
         mime="application/json",
         use_container_width=True,
     )
 
-    with st.expander("Streamlit secrets 예시"):
-        st.code(
-            """
-            SAM_API_KEY = "sam-..."
-            SAM_MODEL = "claude-haiku"
-            SAM_FALLBACK_MODELS = "gpt-5.4-mini"
-            SAM_BASE_URL = "https://sam.soonsoon.ai"
-            KIPRISPLUS_API_KEY = "발급받은 키"
-            KIPRISPLUS_ENDPOINT = "신청 상품의 API endpoint"
-            """.strip(),
-            language="toml",
-        )
+    with st.expander("특허 예비 검토"):
+        review = case.get("patent_review", {})
+        st.markdown(f"### {review.get('readiness', '검토 필요')}")
+        keywords = review.get("keywords", [])
+        claims = review.get("claims", [])
+        st.write(", ".join(keywords) if keywords else "추출된 키워드가 없습니다.")
+        for claim in claims:
+            st.write(f"- {claim}")
+        if review.get("query"):
+            st.code(review["query"], language="text")
+        st.markdown(f"[KIPRIS에서 검색]({review.get('kipris_url', 'https://www.kipris.or.kr/')})")
+
+        kipris_ready = bool(secret_value("KIPRISPLUS_API_KEY"))
+        endpoint = kiprisplus_endpoint()
+        query_param = kiprisplus_query_param(endpoint)
+        if kipris_ready:
+            st.success("KIPRISPlus API 키가 Secrets에 등록되어 있습니다.")
+        else:
+            st.info("KIPRISPlus 실시간 검색은 API 신청 후 Secrets에 키를 등록하면 연결할 수 있습니다.")
+
+        if query_param == "applicationNumber":
+            st.warning("현재 endpoint는 출원번호 조회형입니다. 업로드 자료 기반 검색에는 자유검색/항목별검색 endpoint와 `KIPRISPLUS_QUERY_PARAM = \"word\"` 설정이 필요합니다.")
+
+        default_query = review.get("query") or " ".join(keywords[:6])
+        patent_query = st.text_input("특허 검색어", value=default_query)
+
+        if st.button("KIPRISPlus로 검색", disabled=not kipris_ready or not patent_query.strip(), use_container_width=True):
+            with st.spinner("KIPRISPlus에서 선행기술 후보를 검색하고 있습니다."):
+                try:
+                    review["kiprisplus_results"] = call_kiprisplus_search(patent_query.strip(), limit=5)
+                    st.success("검색이 완료되었습니다.")
+                except Exception as exc:
+                    review["kiprisplus_results"] = {
+                        "error": str(exc),
+                        "items": [],
+                        "query": patent_query.strip(),
+                    }
+                    st.error(str(exc))
+
+        results = review.get("kiprisplus_results")
+        if results:
+            if results.get("error"):
+                st.warning(results["error"])
+            else:
+                st.caption(
+                    f"검색어: {results.get('query', '')} · 파라미터: {results.get('query_param', '')} · 결과 {results.get('count', 0)}건"
+                )
+                for index, item in enumerate(results.get("items", [])[:5], start=1):
+                    render_kiprisplus_item(item, index)
+                if not results.get("items"):
+                    st.info("표시할 검색 결과가 없습니다. 검색어 또는 API endpoint 상품을 확인해 주세요.")
+
+    with st.expander("보안 확인"):
+        st.write("- 실제 API 키는 코드나 GitHub 저장소에 저장하지 않습니다.")
+        st.write("- 이 앱은 Streamlit Secrets 또는 환경변수에서만 키를 읽습니다.")
+        st.write("- 업로드 원본은 세션 처리에만 사용하고, 리포트에는 파일명과 메타데이터만 남깁니다.")
 
 
 def main() -> None:
     inject_style()
     ensure_state()
     render_hero()
-    material = latest_material()
-    render_stage_strip(material)
-    render_status_cards(material)
 
-    tabs = st.tabs(["등록·수집", "전사", "AI 초안", "주니어 협업", "검수", "특허 검토", "리포트"])
-    with tabs[0]:
-        render_capture_tab()
-    with tabs[1]:
-        render_stt_tab(latest_material())
-    with tabs[2]:
-        render_ai_draft_tab(latest_material())
-    with tabs[3]:
-        render_junior_collaboration_tab(latest_material())
-    with tabs[4]:
-        render_review_tab(latest_material())
-    with tabs[5]:
-        render_patent_tab(latest_material())
-    with tabs[6]:
-        render_report_tab(latest_material())
+    case = st.session_state.get("case")
+    render_step_strip(case)
+    selected_step = render_navigation(case)
+
+    if selected_step == "capture":
+        render_capture()
+    elif selected_step == "draft":
+        render_draft(st.session_state.get("case"))
+    elif selected_step == "collab":
+        render_collaboration(st.session_state.get("case"))
+    else:
+        render_result(st.session_state.get("case"))
 
 
 if __name__ == "__main__":

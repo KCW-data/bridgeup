@@ -1,6 +1,6 @@
 # AIVIO / Bridge-Up MVP
 
-숙련자의 작업 영상, 음성 설명, 단계별 이미지, 문서화된 작업표준을 수집하고 STT 기반 노하우 문서화, 특허 선행기술 검색, 멘토 검수를 거쳐 주니어 학습·실행 프로젝트로 연결하는 MVP입니다.
+숙련자의 작업 영상, 음성 설명, 사진, 문서화된 작업표준을 수집하고 STT 기반 노하우 문서화, 주니어 협업, 시니어·기업 검수, 특허 선행기술 예비 검토로 연결하는 MVP입니다.
 
 이 저장소에는 두 가지 실행 방식이 있습니다.
 
@@ -21,12 +21,12 @@ requirements.txt Streamlit Cloud 의존성
 
 ## 핵심 흐름
 
-1. 시니어·멘토가 현장 영상, 음성 녹음, 기존 음성 파일, 이미지, PDF 문서를 등록합니다.
+1. 시니어·멘토가 현장 영상, 음성 녹음, 기존 음성 파일, 사진, PDF 문서를 등록합니다.
 2. 영상·음성 자료를 STT로 전사해 작업 설명 텍스트를 생성합니다.
 3. 전사문을 기반으로 작업 절차, 판단 기준, 주의사항, 체크리스트를 노하우 문서로 정리합니다.
-4. 노하우 문서에서 특허 검색 키워드와 청구항 후보 문장을 추출합니다.
-5. KIPRISPlus API 또는 수동 KIPRIS 검색으로 선행기술을 확인하고 등록 가능성 예비 검토를 제공합니다.
-6. 멘토 검수 후 주니어 학습 WBS와 운영 리포트로 전환합니다.
+4. 주니어가 전사문, 작업 순서, 검수 질문을 확인합니다.
+5. 시니어와 기업이 현장 정확성, 공개 범위, 보안 정보를 검수합니다.
+6. 노하우 문서에서 특허 검색 키워드와 청구항 후보 문장을 추출합니다.
 
 ## PHP 설치
 
@@ -70,11 +70,18 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Streamlit 버전은 서버 DB 없이 세션 기반으로 동작합니다. 업로드 파일은 분석 메타데이터와 리포트 생성에 사용되며, 결과는 JSON으로 다운로드할 수 있습니다.
+Streamlit 버전은 서버 DB 없이 세션 기반으로 동작합니다. 업로드 원본은 전사·분석 처리에만 사용하고, 다운로드 리포트에는 파일명과 메타데이터만 남깁니다. GitHub에는 `app.py`, `streamlit_app.py`, `requirements.txt`, `.streamlit/config.toml`을 함께 올려야 합니다.
+
+화면은 시니어 사용자를 기준으로 4단계만 보이도록 구성했습니다.
+
+1. 입력
+2. AI 정리
+3. 협업 검수
+4. 결과
 
 ### Streamlit secrets
 
-STT와 AI 지식화를 실제로 실행하려면 Streamlit Community Cloud의 Secrets에 아래 값을 등록합니다.
+STT와 AI 지식화를 실제로 실행하려면 Streamlit Community Cloud의 Secrets에 아래 값을 등록합니다. 실제 API 키는 코드, README, GitHub 저장소, `.streamlit/secrets.example.toml`에 넣지 않습니다.
 
 ```toml
 SAM_API_KEY = "sam-..."
@@ -83,11 +90,15 @@ SAM_FALLBACK_MODELS = "gpt-5.4-mini"
 SAM_BASE_URL = "https://sam.soonsoon.ai"
 ```
 
-특허 검색을 자동화하려면 KIPRISPlus에서 Open API 상품을 신청한 뒤 발급 정보를 추가합니다.
+특허 검색을 자동화하려면 KIPRISPlus에서 Open API 상품을 신청한 뒤 발급 정보를 Streamlit Cloud Secrets에 추가합니다. API 키는 `마이페이지 > API KEY > REST AccessKey`에서 확인하고, endpoint는 신청한 상품의 설명 페이지 또는 API 통합설명서의 REST 호출 URL에서 확인합니다.
 
 ```toml
 KIPRISPLUS_API_KEY = "발급받은 키"
-KIPRISPLUS_ENDPOINT = "신청 상품의 API endpoint"
+KIPRISPLUS_ENDPOINT = "신청한 검색 상품의 REST 호출 URL"
+KIPRISPLUS_QUERY_PARAM = "word"
+KIPRISPLUS_EXTRA_PARAMS = '{"pageNo":"1","numOfRows":"5"}'
 ```
 
-현재 Streamlit MVP는 SAM 기반 STT, AI 초안 생성, 주니어 협업 보드, 시니어·기업 검수, 특허 검색 키워드·청구항 후보 생성까지 구현되어 있습니다. KIPRISPlus 실시간 검색은 API 신청 후 endpoint와 응답 형식에 맞춰 연결하면 됩니다.
+첨부 샘플의 `getBibliographySumryInfoSearch`는 이미 알고 있는 출원번호로 서지요약을 조회하는 예시입니다. 사용자가 업로드한 영상·음성에서 추출한 키워드로 선행기술을 검색하려면 자유검색 또는 항목별검색 endpoint를 사용하고 `KIPRISPLUS_QUERY_PARAM`을 해당 상품의 검색어 파라미터명으로 맞춰야 합니다. 상품 설명에 나온 파라미터명이 `word`가 아니면 이 값도 함께 바꿉니다.
+
+현재 Streamlit MVP는 SAM 기반 STT, AI 초안 생성, 주니어 협업 체크리스트, 시니어·기업 검수, 특허 검색 키워드·청구항 후보 생성, KIPRISPlus 검색 결과 후보 표시까지 구현되어 있습니다.
